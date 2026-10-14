@@ -542,6 +542,36 @@ img {
   font-size: 0.935rem;
 }
 
+.delete-message-btn {
+  position: absolute;
+  top: -8px;
+  right: -10px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  opacity: 0;
+  transition: var(--transition-fast);
+  box-shadow: var(--shadow-sm);
+  z-index: var(--z-base);
+}
+
+.message-row:hover .delete-message-btn,
+.delete-message-btn:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .delete-message-btn {
+    opacity: 1;
+  }
+}
+
 .message-row.sent .message-bubble {
   background: var(--bubble-sent);
   color: var(--bubble-sent-text);

@@ -16,6 +16,7 @@ import { onAuthStateChanged, signOut } from 'firebase/auth';
 import {
   collection,
   addDoc,
+  deleteDoc,
   query,
   orderBy,
   onSnapshot,
@@ -174,7 +175,7 @@ function saveLocalMessages(msgs) {
 if (localChannel) {
   localChannel.onmessage = (event) => {
     const { type, data } = event.data;
-    if (type === 'NEW_MESSAGE' || type === 'UPDATE_MESSAGE') {
+    if (type === 'NEW_MESSAGE' || type === 'UPDATE_MESSAGE' || type === 'DELETE_MESSAGE') {
       if (state.isLocalMode) {
         state.messages = getLocalMessages();
         renderMessages();
@@ -530,6 +531,28 @@ async function toggleReaction(messageId, emoji) {
 
   state.showReactionPicker = null;
   renderMessages();
+}
+
+async function deleteMessage(messageId) {
+  const msg = state.messages.find(message => message.id === messageId);
+  if (!msg || msg.senderEmail !== state.user?.email) return;
+  if (!window.confirm('Apagar esta mensagem? Essa ação não pode ser desfeita.')) return;
+
+  if (state.isLocalMode || !db) {
+    const messages = getLocalMessages().filter(message => message.id !== messageId);
+    saveLocalMessages(messages);
+    state.messages = messages;
+    renderMessages();
+    localChannel?.postMessage({ type: 'DELETE_MESSAGE', data: { id: messageId } });
+    return;
+  }
+
+  try {
+    await deleteDoc(doc(db, 'messages', messageId));
+  } catch (e) {
+    console.error('Delete message error:', e);
+    showToast(`Erro ao apagar: ${e.code || e.message}`);
+  }
 }
 
 // ============================================
@@ -926,6 +949,7 @@ function renderMessages() {
       <div class="message-row ${direction}" data-msgid="${msg.id}">
         <div class="message-bubble">
           <button class="emoji-react-btn" data-msgid="${msg.id}">😊</button>
+          ${isSent ? `<button class="delete-message-btn" type="button" data-msgid="${msg.id}" aria-label="Apagar mensagem" title="Apagar mensagem">🗑️</button>` : ''}
           ${contentHtml}
           ${reactionsHtml}
         </div>
@@ -961,6 +985,13 @@ function renderMessages() {
         state.showReactionPicker = msgId;
         renderReactionPicker(btn, msgId);
       }
+    });
+  });
+
+  container.querySelectorAll('.delete-message-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteMessage(btn.dataset.msgid);
     });
   });
 
