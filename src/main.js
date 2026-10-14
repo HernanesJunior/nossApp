@@ -22,7 +22,8 @@ import {
   onSnapshot,
   serverTimestamp,
   doc,
-  updateDoc
+  updateDoc,
+  setDoc
 } from 'firebase/firestore';
 import {
   ref,
@@ -54,6 +55,10 @@ const state = {
   showSettings: false,
   imageFiles: [],
   typingTimeout: null,
+  presenceInterval: null,
+  partnerTyping: false,
+  searchQuery: '',
+  replyTo: null,
   unsubMessages: null,
   unsubPresence: null,
   unsubTyping: null,
@@ -178,11 +183,13 @@ if (localChannel) {
     if (type === 'NEW_MESSAGE' || type === 'UPDATE_MESSAGE' || type === 'DELETE_MESSAGE') {
       if (state.isLocalMode) {
         state.messages = getLocalMessages();
+        if (!document.hidden) markMessagesRead(state.messages);
         renderMessages();
       }
     } else if (type === 'TYPING') {
       if (data.email !== state.user?.email) {
-        updateHeaderStatus(data.isTyping);
+        state.partnerTyping = data.isTyping;
+        updateHeaderStatus();
       }
     } else if (type === 'PRESENCE') {
       if (data.email !== state.user?.email) {
@@ -192,7 +199,8 @@ if (localChannel) {
           online: data.online,
           lastSeen: data.lastSeen
         };
-        updateHeaderStatus(false);
+        state.partnerTyping = false;
+        updateHeaderStatus();
       }
     }
   };
@@ -374,6 +382,17 @@ async function updatePresence(online) {
       }
     });
   }
+
+  if (!state.isLocalMode && db && state.user.uid) {
+    await setDoc(doc(db, 'presence', state.user.uid), {
+      uid: state.user.uid,
+      email: state.user.email,
+      displayName: state.user.displayName,
+      online,
+      typing: false,
+      lastSeen: serverTimestamp()
+    }, { merge: true });
+  }
 }
 
 async function setTyping(isTyping) {
@@ -385,18 +404,83 @@ async function setTyping(isTyping) {
       data: { email: state.user.email, isTyping }
     });
   }
+
+  if (!state.isLocalMode && db && state.user.uid) {
+    try {
+      await setDoc(doc(db, 'presence', state.user.uid), {
+        uid: state.user.uid,
+        email: state.user.email,
+        displayName: state.user.displayName,
+        online: true,
+        typing: isTyping,
+        lastSeen: serverTimestamp()
+      }, { merge: true });
+    } catch (error) {
+      console.error('Typing status update error:', error);
+      showToast('Não foi possível atualizar o status de digitação.');
+    }
+  }
 }
 
 function listenPartnerPresence() {
-  updatePresence(true);
+  updatePresence(true).catch((error) => {
+    console.error('Presence update error:', error);
+    showToast('Não foi possível atualizar sua presença.');
+  });
+
+  if (state.isLocalMode || !db || !state.user?.uid) return;
+
+  if (state.unsubPresence) state.unsubPresence();
+  state.unsubPresence = onSnapshot(collection(db, 'presence'), (snapshot) => {
+    const partnerPresence = snapshot.docs
+      .map((presenceDoc) => ({ id: presenceDoc.id, ...presenceDoc.data() }))
+      .find((presence) => presence.id !== state.user.uid && presence.email !== state.user.email);
+
+    if (!partnerPresence) {
+      state.partner = null;
+      state.partnerTyping = false;
+      updateHeaderStatus();
+      return;
+    }
+
+    const lastSeen = partnerPresence.lastSeen?.toDate
+      ? partnerPresence.lastSeen.toDate()
+      : new Date(partnerPresence.lastSeen || 0);
+    const isFresh = !Number.isNaN(lastSeen.getTime()) && Date.now() - lastSeen.getTime() < 60000;
+    state.partner = {
+      uid: partnerPresence.uid || partnerPresence.id,
+      email: partnerPresence.email,
+      displayName: partnerPresence.displayName,
+      online: Boolean(partnerPresence.online && isFresh),
+      lastSeen: lastSeen.toISOString()
+    };
+    state.partnerTyping = Boolean(state.partner.online && partnerPresence.typing);
+    updateHeaderStatus();
+  }, (error) => {
+    console.error('Presence listener error:', error);
+    showToast('Não foi possível acompanhar a presença do contato.');
+  });
+
+  if (state.presenceInterval) clearInterval(state.presenceInterval);
+  state.presenceInterval = setInterval(() => {
+    if (!document.hidden) {
+      updatePresence(true).catch((error) => console.error('Presence heartbeat error:', error));
+    }
+    updateHeaderStatus();
+  }, 25000);
 }
 
-function updateHeaderStatus(isTyping = false) {
+function updateHeaderStatus() {
   const statusEl = $('.header-status');
   const dotEl = $('.online-dot');
   if (!statusEl) return;
 
-  if (isTyping) {
+  const headerName = $('.header-name');
+  const avatarInitial = $('.header-avatar > span');
+  if (headerName) headerName.textContent = getPartnerName();
+  if (avatarInitial) avatarInitial.textContent = getPartnerInitial();
+
+  if (state.partnerTyping) {
     statusEl.textContent = 'digitando...';
     statusEl.classList.add('typing');
   } else if (state.partner?.online) {
@@ -404,9 +488,12 @@ function updateHeaderStatus(isTyping = false) {
     statusEl.classList.remove('typing');
     if (dotEl) dotEl.classList.remove('offline');
   } else {
-    statusEl.textContent = 'online';
+    const lastSeen = state.partner?.lastSeen ? new Date(state.partner.lastSeen) : null;
+    statusEl.textContent = lastSeen && !Number.isNaN(lastSeen.getTime())
+      ? `visto por último ${formatTime(lastSeen)}`
+      : 'offline';
     statusEl.classList.remove('typing');
-    if (dotEl) dotEl.classList.remove('offline');
+    if (dotEl) dotEl.classList.add('offline');
   }
 }
 
@@ -416,6 +503,7 @@ function updateHeaderStatus(isTyping = false) {
 function listenMessages() {
   if (state.isLocalMode) {
     state.messages = getLocalMessages();
+    if (!document.hidden) markMessagesRead(state.messages);
     renderMessages();
     return;
   }
@@ -433,22 +521,42 @@ function listenMessages() {
       newMessages.push({ id: d.id, ...d.data() });
     });
 
-    snapshot.docChanges().forEach(change => {
-      if (change.type === 'added') {
-        const msg = change.doc.data();
-        if (msg.senderEmail !== state.user?.email && !msg.read) {
-          updateDoc(doc(db, 'messages', change.doc.id), { read: true }).catch(() => {});
-        }
-      }
-    });
-
     state.messages = newMessages;
+    if (!document.hidden) markMessagesRead(newMessages);
     renderMessages();
+  }, (error) => {
+    console.error('Messages listener error:', error);
+    showToast('Não foi possível carregar as mensagens.');
   });
 }
 
-async function sendMessage(text, imageUrl = null, audioUrl = null) {
-  if (!text && !imageUrl && !audioUrl) return;
+function markMessagesRead(messages) {
+  const unreadMessages = messages.filter((message) =>
+    message.senderEmail !== state.user?.email && !message.read
+  );
+  if (unreadMessages.length === 0) return;
+
+  if (state.isLocalMode || !db) {
+    const unreadIds = new Set(unreadMessages.map((message) => message.id));
+    const updatedMessages = getLocalMessages().map((message) =>
+      unreadIds.has(message.id) ? { ...message, read: true } : message
+    );
+    saveLocalMessages(updatedMessages);
+    state.messages = updatedMessages;
+    localChannel?.postMessage({ type: 'UPDATE_MESSAGE', data: { read: true } });
+    return;
+  }
+
+  unreadMessages.forEach((message) => {
+    updateDoc(doc(db, 'messages', message.id), { read: true }).catch((error) => {
+      console.error('Read receipt error:', error);
+      showToast('Não foi possível confirmar a leitura.');
+    });
+  });
+}
+
+async function sendMessage(text, imageUrl = null, audioUrl = null, attachment = null) {
+  if (!text && !imageUrl && !audioUrl && !attachment) return false;
 
   const newMessage = {
     id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
@@ -459,7 +567,12 @@ async function sendMessage(text, imageUrl = null, audioUrl = null) {
     senderName: String(state.user?.displayName || 'Amor'),
     createdAt: new Date().toISOString(),
     read: false,
-    reactions: {}
+    reactions: {},
+    fileUrl: attachment?.url || null,
+    fileName: attachment?.name || null,
+    fileType: attachment?.type || null,
+    fileSize: attachment?.size || null,
+    replyTo: state.replyTo ? { ...state.replyTo } : null
   };
 
   if (state.isLocalMode || !db) {
@@ -473,7 +586,7 @@ async function sendMessage(text, imageUrl = null, audioUrl = null) {
       localChannel.postMessage({ type: 'NEW_MESSAGE', data: newMessage });
     }
     setTyping(false);
-    return;
+    return true;
   }
 
   try {
@@ -481,16 +594,23 @@ async function sendMessage(text, imageUrl = null, audioUrl = null) {
       text: newMessage.text,
       imageUrl: newMessage.imageUrl,
       audioUrl: newMessage.audioUrl,
+      fileUrl: newMessage.fileUrl,
+      fileName: newMessage.fileName,
+      fileType: newMessage.fileType,
+      fileSize: newMessage.fileSize,
       senderEmail: newMessage.senderEmail,
       senderName: newMessage.senderName,
       read: false,
       reactions: {},
+      replyTo: newMessage.replyTo,
       createdAt: serverTimestamp()
     });
     setTyping(false);
+    return true;
   } catch (e) {
     console.error('Send error:', e);
     showToast(`Erro ao enviar: ${e.code || e.message}`);
+    return false;
   }
 }
 
@@ -533,6 +653,74 @@ async function toggleReaction(messageId, emoji) {
   renderMessages();
 }
 
+async function editMessage(messageId) {
+  const message = state.messages.find((item) => item.id === messageId);
+  if (!message || message.senderEmail !== state.user?.email || !message.text) return;
+
+  const editedText = window.prompt('Editar mensagem:', message.text);
+  if (editedText === null) return;
+  const text = editedText.trim();
+  if (!text) {
+    showToast('A mensagem não pode ficar vazia.');
+    return;
+  }
+
+  const changes = { text, editedAt: new Date().toISOString() };
+  if (state.isLocalMode || !db) {
+    const messages = getLocalMessages();
+    const target = messages.find((item) => item.id === messageId);
+    if (!target) return;
+    Object.assign(target, changes);
+    saveLocalMessages(messages);
+    state.messages = messages;
+    renderMessages();
+    localChannel?.postMessage({ type: 'UPDATE_MESSAGE', data: target });
+    return;
+  }
+
+  try {
+    await updateDoc(doc(db, 'messages', messageId), changes);
+  } catch (error) {
+    console.error('Edit message error:', error);
+    showToast(`Erro ao editar: ${error.code || error.message}`);
+  }
+}
+
+function replyToMessage(messageId) {
+  const message = state.messages.find((item) => item.id === messageId);
+  if (!message) return;
+  state.replyTo = {
+    id: message.id,
+    senderName: message.senderName || 'Contato',
+    text: message.text || (message.imageUrl ? '📷 Foto' : message.audioUrl ? '🎤 Áudio' : message.fileName || 'Anexo')
+  };
+  renderReplyPreview();
+  $('#message-input')?.focus();
+}
+
+function renderReplyPreview() {
+  const preview = $('#reply-preview');
+  if (!preview) return;
+  if (!state.replyTo) {
+    preview.hidden = true;
+    preview.innerHTML = '';
+    return;
+  }
+
+  preview.hidden = false;
+  preview.innerHTML = `
+    <div class="reply-preview-copy">
+      <strong>Respondendo a ${escapeHtml(state.replyTo.senderName)}</strong>
+      <span>${escapeHtml(state.replyTo.text)}</span>
+    </div>
+    <button type="button" class="reply-preview-close" aria-label="Cancelar resposta">✕</button>
+  `;
+  preview.querySelector('.reply-preview-close').addEventListener('click', () => {
+    state.replyTo = null;
+    renderReplyPreview();
+  });
+}
+
 async function deleteMessage(messageId) {
   const msg = state.messages.find(message => message.id === messageId);
   if (!msg || msg.senderEmail !== state.user?.email) return;
@@ -558,14 +746,27 @@ async function deleteMessage(messageId) {
 // ============================================
 // File Upload & Audio Recording
 // ============================================
-async function uploadImage(file) {
+async function uploadAttachment(file) {
+  const safeName = file.name.replace(/[^\w.-]/g, '_');
   if (state.isLocalMode || !storage) {
-    return await blobToDataURL(file);
+    return {
+      url: await blobToDataURL(file),
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      size: file.size
+    };
   }
-  const fileName = `images/${Date.now()}_${file.name}`;
+  const fileName = `attachments/${Date.now()}_${safeName}`;
   const storageRef = ref(storage, fileName);
-  const snapshot = await uploadBytes(storageRef, file);
-  return getDownloadURL(snapshot.ref);
+  const snapshot = await uploadBytes(storageRef, file, {
+    contentType: file.type || 'application/octet-stream'
+  });
+  return {
+    url: await getDownloadURL(snapshot.ref),
+    name: file.name,
+    type: file.type || 'application/octet-stream',
+    size: file.size
+  };
 }
 
 async function uploadAudio(blob) {
@@ -595,8 +796,12 @@ async function startRecording() {
       showToast('Enviando áudio...');
       try {
         const url = await uploadAudio(audioBlob);
-        await sendMessage('', null, url);
-        showToast('Áudio enviado! 🎤');
+        const sent = await sendMessage('', null, url);
+        if (sent) {
+          state.replyTo = null;
+          renderReplyPreview();
+          showToast('Áudio enviado! 🎤');
+        }
       } catch (e) {
         console.error('Audio upload error:', e);
         showToast('Erro ao enviar áudio');
@@ -638,6 +843,10 @@ function updateSendButton() {
 // Render: Chat
 // ============================================
 function renderChat() {
+  if (state.unsubMessages) state.unsubMessages();
+  if (state.unsubPresence) state.unsubPresence();
+  if (state.presenceInterval) clearInterval(state.presenceInterval);
+
   const app = $('#app');
   app.innerHTML = `
     <div class="chat-app">
@@ -652,6 +861,9 @@ function renderChat() {
           <div class="header-status">online</div>
         </div>
         <div class="header-actions">
+          <button class="header-btn" id="search-btn" title="Pesquisar mensagens" aria-label="Pesquisar mensagens">
+            ${icons.search}
+          </button>
           <button class="header-btn" id="theme-toggle-btn" title="Alternar tema">
             ${state.theme === 'dark' ? icons.sun : icons.moon}
           </button>
@@ -662,6 +874,11 @@ function renderChat() {
             ${icons.logout}
           </button>
         </div>
+      </div>
+
+      <div class="chat-search-bar" id="chat-search-bar" hidden>
+        <input type="search" id="chat-search-input" placeholder="Pesquisar mensagens..." aria-label="Pesquisar mensagens" />
+        <button type="button" id="close-search-btn" aria-label="Fechar pesquisa">✕</button>
       </div>
 
       <!-- Messages -->
@@ -678,16 +895,17 @@ function renderChat() {
 
       <!-- Input Area -->
       <div class="chat-input-area" style="position: relative;">
+        <div class="reply-preview" id="reply-preview" hidden></div>
         <div class="input-container">
           <div class="input-actions-left">
             <button class="input-btn" id="emoji-btn" title="Emoji">${icons.emoji}</button>
-            <button class="input-btn" id="image-btn" title="Enviar foto">${icons.image}</button>
+            <button class="input-btn" id="image-btn" title="Anexar foto ou arquivo">${icons.attachment}</button>
             <button class="input-btn" id="mic-btn" title="Gravar áudio">${icons.mic}</button>
           </div>
           <textarea class="message-input" id="message-input" placeholder="Digita aqui, amor... 💜" rows="1"></textarea>
           <button class="send-btn" id="send-btn">${icons.send}</button>
         </div>
-        <input type="file" id="image-file-input" accept="image/*" multiple style="display:none;" />
+        <input type="file" id="image-file-input" multiple style="display:none;" />
       </div>
     </div>
   `;
@@ -696,14 +914,19 @@ function renderChat() {
   listenMessages();
   listenPartnerPresence();
 
-  document.addEventListener('visibilitychange', () => {
-    updatePresence(!document.hidden);
-  });
+  document.onvisibilitychange = () => {
+    updatePresence(!document.hidden).catch((error) => {
+      console.error('Presence update error:', error);
+      showToast('Não foi possível atualizar sua presença.');
+    });
+    if (!document.hidden) markMessagesRead(state.messages);
+    if (!document.hidden) renderMessages();
+  };
 
-  window.addEventListener('beforeunload', () => {
-    updatePresence(false);
+  window.onbeforeunload = () => {
+    updatePresence(false).catch((error) => console.error('Presence shutdown error:', error));
     setTyping(false);
-  });
+  };
 }
 
 function setupChatEvents() {
@@ -715,6 +938,9 @@ function setupChatEvents() {
   const fileInput = $('#image-file-input');
   const settingsBtn = $('#settings-btn');
   const themeBtn = $('#theme-toggle-btn');
+  const searchBtn = $('#search-btn');
+  const searchBar = $('#chat-search-bar');
+  const searchInput = $('#chat-search-input');
 
   input.addEventListener('input', () => {
     input.style.height = 'auto';
@@ -746,6 +972,21 @@ function setupChatEvents() {
   imageBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', handleImageSelect);
 
+  searchBtn.addEventListener('click', () => {
+    searchBar.hidden = false;
+    searchInput.focus();
+  });
+  searchInput.addEventListener('input', () => {
+    state.searchQuery = searchInput.value.trim().toLocaleLowerCase('pt-BR');
+    renderMessages();
+  });
+  $('#close-search-btn').addEventListener('click', () => {
+    state.searchQuery = '';
+    searchInput.value = '';
+    searchBar.hidden = true;
+    renderMessages();
+  });
+
   micBtn.addEventListener('click', () => {
     if (state.isRecording) {
       stopRecording();
@@ -762,11 +1003,14 @@ function setupChatEvents() {
   const headerLogoutBtn = $('#header-logout-btn');
   if (headerLogoutBtn) {
     headerLogoutBtn.addEventListener('click', async () => {
-      try { await updatePresence(false); } catch(e) {}
+      try { await updatePresence(false); } catch(error) {
+        console.error('Presence shutdown error:', error);
+      }
       try { await setTyping(false); } catch(e) {}
       if (state.unsubMessages) { try { state.unsubMessages(); } catch(e) {} }
       if (state.unsubPresence) { try { state.unsubPresence(); } catch(e) {} }
       if (state.unsubTyping) { try { state.unsubTyping(); } catch(e) {} }
+      if (state.presenceInterval) clearInterval(state.presenceInterval);
 
       setActiveSession(null);
       localStorage.removeItem('nj_current_local_user');
@@ -813,37 +1057,62 @@ async function handleSend() {
   }
 
   if (state.imageFiles.length > 0) {
-    showToast('Enviando fotos...');
-    for (const file of state.imageFiles) {
+    showToast('Enviando anexos...');
+    let sentText = false;
+    for (const file of [...state.imageFiles]) {
       try {
-        const url = await uploadImage(file);
-        await sendMessage(text && state.imageFiles.indexOf(file) === 0 ? text : '', url);
-      } catch (e) {
-        console.error('Image upload error:', e);
-        showToast('Erro ao enviar foto');
+        const attachment = await uploadAttachment(file);
+        const imageUrl = file.type.startsWith('image/') ? attachment.url : null;
+        const messageSent = await sendMessage(
+          text && !sentText ? text : '',
+          imageUrl,
+          null,
+          imageUrl ? null : attachment
+        );
+        if (messageSent) {
+          sentText = sentText || Boolean(text);
+          state.imageFiles = state.imageFiles.filter((pendingFile) => pendingFile !== file);
+          if (file.previewUrl) URL.revokeObjectURL(file.previewUrl);
+          if (state.replyTo) state.replyTo = null;
+        }
+      } catch (error) {
+        console.error('Attachment upload error:', error);
+        showToast(`Erro ao enviar ${file.name}: ${error.message}`);
       }
     }
-    state.imageFiles = [];
     renderImagePreview();
-    if (text) {
+    if (sentText) {
       input.value = '';
       input.style.height = 'auto';
     }
+    renderReplyPreview();
     return;
   }
 
   if (!text) return;
 
-  input.value = '';
-  input.style.height = 'auto';
-  await sendMessage(text);
+  if (await sendMessage(text)) {
+    input.value = '';
+    input.style.height = 'auto';
+    state.replyTo = null;
+    renderReplyPreview();
+  }
 }
 
 function handleImageSelect(e) {
   const files = Array.from(e.target.files);
   if (files.length === 0) return;
 
-  state.imageFiles = [...state.imageFiles, ...files];
+  const maxSize = state.isLocalMode ? 2 * 1024 * 1024 : 25 * 1024 * 1024;
+  const acceptedFiles = files.filter((file) => {
+    if (file.size > maxSize) {
+      showToast(`${file.name} excede o limite de ${state.isLocalMode ? '2 MB' : '25 MB'}.`);
+      return false;
+    }
+    file.previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
+    return true;
+  });
+  state.imageFiles = [...state.imageFiles, ...acceptedFiles];
   renderImagePreview();
   e.target.value = '';
 }
@@ -861,7 +1130,10 @@ function renderImagePreview() {
   bar.style.display = 'flex';
   bar.innerHTML = state.imageFiles.map((file, i) => `
     <div class="image-preview-item">
-      <img src="${URL.createObjectURL(file)}" alt="preview" />
+      ${file.previewUrl
+        ? `<img src="${file.previewUrl}" alt="Prévia de ${escapeHtml(file.name)}" />`
+        : `<span class="file-preview-icon">📎</span>`}
+      <span class="file-preview-name">${escapeHtml(file.name)}</span>
       <div class="image-preview-remove" data-index="${i}">✕</div>
     </div>
   `).join('');
@@ -869,7 +1141,8 @@ function renderImagePreview() {
   bar.querySelectorAll('.image-preview-remove').forEach(btn => {
     btn.addEventListener('click', () => {
       const idx = parseInt(btn.dataset.index);
-      state.imageFiles.splice(idx, 1);
+      const [removedFile] = state.imageFiles.splice(idx, 1);
+      if (removedFile?.previewUrl) URL.revokeObjectURL(removedFile.previewUrl);
       renderImagePreview();
     });
   });
@@ -882,12 +1155,23 @@ function renderMessages() {
   const container = $('#messages-container');
   if (!container) return;
 
-  if (state.messages.length === 0) {
+  const visibleMessages = state.messages.filter((message) => {
+    if (!state.searchQuery) return true;
+    const searchableText = [
+      message.text,
+      message.senderName,
+      message.fileName,
+      message.replyTo?.text
+    ].filter(Boolean).join(' ').toLocaleLowerCase('pt-BR');
+    return searchableText.includes(state.searchQuery);
+  });
+
+  if (visibleMessages.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
         <div class="empty-state-heart">💜</div>
-        <h3>Comecem a conversar!</h3>
-        <p>Mande a primeira mensagem para o seu amor 💌</p>
+        <h3>${state.searchQuery ? 'Nenhuma mensagem encontrada' : 'Comecem a conversar!'}</h3>
+        <p>${state.searchQuery ? 'Tente buscar por outro termo.' : 'Mande a primeira mensagem para o seu amor 💌'}</p>
       </div>
     `;
     return;
@@ -896,7 +1180,7 @@ function renderMessages() {
   let html = '';
   let lastDate = '';
 
-  state.messages.forEach((msg) => {
+  visibleMessages.forEach((msg) => {
     const msgDate = formatDate(msg.createdAt);
     if (msgDate && msgDate !== lastDate) {
       lastDate = msgDate;
@@ -928,33 +1212,59 @@ function renderMessages() {
     }
 
     let contentHtml = '';
+    if (msg.replyTo) {
+      contentHtml += `
+        <div class="message-quote">
+          <strong>${escapeHtml(msg.replyTo.senderName || 'Contato')}</strong>
+          <span>${escapeHtml(msg.replyTo.text || 'Mensagem')}</span>
+        </div>
+      `;
+    }
     if (msg.imageUrl) {
-      contentHtml += `<img class="message-image" src="${msg.imageUrl}" alt="foto" data-src="${msg.imageUrl}" />`;
+      const imageUrl = escapeHtml(msg.imageUrl);
+      contentHtml += `<img class="message-image" src="${imageUrl}" alt="foto" data-src="${imageUrl}" />`;
     }
     if (msg.audioUrl) {
+      const audioUrl = escapeHtml(msg.audioUrl);
       contentHtml += `
         <div class="message-audio">
           <span>🎤</span>
           <audio controls preload="none">
-            <source src="${msg.audioUrl}" type="audio/webm" />
+            <source src="${audioUrl}" type="audio/webm" />
           </audio>
         </div>
+      `;
+    }
+    if (msg.fileUrl && msg.fileName) {
+      contentHtml += `
+        <a class="message-file" href="${escapeHtml(msg.fileUrl)}" target="_blank" rel="noopener noreferrer" download="${escapeHtml(msg.fileName)}">
+          <span>📎</span>
+          <span>${escapeHtml(msg.fileName)}<small>${msg.fileSize ? `${Math.max(1, Math.round(msg.fileSize / 1024))} KB` : 'Arquivo'}</small></span>
+        </a>
       `;
     }
     if (msg.text) {
       contentHtml += `<span class="message-text">${escapeHtml(msg.text)}</span>`;
     }
+    const actionsHtml = `
+      <div class="message-actions">
+        <button class="reply-message-btn" type="button" data-msgid="${msg.id}" aria-label="Responder mensagem" title="Responder">↩</button>
+        ${isSent && msg.text ? `<button class="edit-message-btn" type="button" data-msgid="${msg.id}" aria-label="Editar mensagem" title="Editar">✎</button>` : ''}
+        ${isSent ? `<button class="delete-message-btn" type="button" data-msgid="${msg.id}" aria-label="Apagar mensagem" title="Apagar">🗑</button>` : ''}
+      </div>
+    `;
 
     html += `
       <div class="message-row ${direction}" data-msgid="${msg.id}">
         <div class="message-bubble">
           <button class="emoji-react-btn" data-msgid="${msg.id}">😊</button>
-          ${isSent ? `<button class="delete-message-btn" type="button" data-msgid="${msg.id}" aria-label="Apagar mensagem" title="Apagar mensagem">🗑️</button>` : ''}
+          ${actionsHtml}
           ${contentHtml}
           ${reactionsHtml}
         </div>
         <div class="message-meta">
           <span>${formatTime(msg.createdAt)}</span>
+          ${msg.editedAt ? '<span>· editada</span>' : ''}
           ${statusIcon}
         </div>
       </div>
@@ -992,6 +1302,20 @@ function renderMessages() {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       deleteMessage(btn.dataset.msgid);
+    });
+  });
+
+  container.querySelectorAll('.edit-message-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      editMessage(btn.dataset.msgid);
+    });
+  });
+
+  container.querySelectorAll('.reply-message-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      replyToMessage(btn.dataset.msgid);
     });
   });
 
@@ -1235,11 +1559,14 @@ function renderSettings() {
   });
 
   panel.querySelector('#logout-btn').addEventListener('click', async () => {
-    try { await updatePresence(false); } catch(e) {}
+    try { await updatePresence(false); } catch(error) {
+      console.error('Presence shutdown error:', error);
+    }
     try { await setTyping(false); } catch(e) {}
     if (state.unsubMessages) { try { state.unsubMessages(); } catch(e) {} }
     if (state.unsubPresence) { try { state.unsubPresence(); } catch(e) {} }
     if (state.unsubTyping) { try { state.unsubTyping(); } catch(e) {} }
+    if (state.presenceInterval) clearInterval(state.presenceInterval);
 
     setActiveSession(null);
     localStorage.removeItem('nj_current_local_user');
