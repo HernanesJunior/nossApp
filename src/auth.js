@@ -103,7 +103,8 @@ export async function registerAccount(name, email, password) {
     const sessionUser = {
       uid: cred.user.uid,
       displayName: cleanName,
-      email: cleanEmail
+      email: cleanEmail,
+      photoURL: cred.user.photoURL || null
     };
     setActiveSession(sessionUser);
     return sessionUser;
@@ -130,7 +131,8 @@ export async function registerAccount(name, email, password) {
   const sessionUser = {
     uid: newUser.uid,
     displayName: newUser.displayName,
-    email: newUser.email
+    email: newUser.email,
+    photoURL: newUser.photoURL || null
   };
   setActiveSession(sessionUser);
   return sessionUser;
@@ -145,7 +147,8 @@ export async function loginAccount(email, password) {
     const sessionUser = {
       uid: cred.user.uid,
       displayName: cred.user.displayName || 'Amor',
-      email: cred.user.email
+      email: cred.user.email,
+      photoURL: cred.user.photoURL || null
     };
     setActiveSession(sessionUser);
     return sessionUser;
@@ -164,7 +167,8 @@ export async function loginAccount(email, password) {
   const sessionUser = {
     uid: found.uid,
     displayName: found.displayName,
-    email: found.email
+    email: found.email,
+    photoURL: found.photoURL || null
   };
   setActiveSession(sessionUser);
   return sessionUser;

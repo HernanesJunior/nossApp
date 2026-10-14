@@ -12,7 +12,7 @@ import {
   setActiveSession,
   getRegisteredUsers
 } from './auth.js';
-import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { onAuthStateChanged, signOut, updateProfile } from 'firebase/auth';
 import {
   collection,
   addDoc,
@@ -59,6 +59,8 @@ const state = {
   partnerTyping: false,
   searchQuery: '',
   replyTo: null,
+  activeMessageActions: null,
+  messagePressTimeout: null,
   unsubMessages: null,
   unsubPresence: null,
   unsubTyping: null,
@@ -195,6 +197,7 @@ if (localChannel) {
       if (data.email !== state.user?.email) {
         state.partner = {
           displayName: data.displayName,
+          photoURL: data.photoURL || null,
           email: data.email,
           online: data.online,
           lastSeen: data.lastSeen
@@ -377,6 +380,7 @@ async function updatePresence(online) {
       data: {
         email: state.user.email,
         displayName: state.user.displayName,
+        photoURL: state.user.photoURL || null,
         online,
         lastSeen: new Date().toISOString()
       }
@@ -388,6 +392,7 @@ async function updatePresence(online) {
       uid: state.user.uid,
       email: state.user.email,
       displayName: state.user.displayName,
+      photoURL: state.user.photoURL || null,
       online,
       typing: false,
       lastSeen: serverTimestamp()
@@ -411,6 +416,7 @@ async function setTyping(isTyping) {
         uid: state.user.uid,
         email: state.user.email,
         displayName: state.user.displayName,
+        photoURL: state.user.photoURL || null,
         online: true,
         typing: isTyping,
         lastSeen: serverTimestamp()
@@ -451,6 +457,7 @@ function listenPartnerPresence() {
       uid: partnerPresence.uid || partnerPresence.id,
       email: partnerPresence.email,
       displayName: partnerPresence.displayName,
+      photoURL: partnerPresence.photoURL || null,
       online: Boolean(partnerPresence.online && isFresh),
       lastSeen: lastSeen.toISOString()
     };
@@ -476,9 +483,27 @@ function updateHeaderStatus() {
   if (!statusEl) return;
 
   const headerName = $('.header-name');
-  const avatarInitial = $('.header-avatar > span');
+  const avatarInitial = $('.header-avatar-initial');
   if (headerName) headerName.textContent = getPartnerName();
   if (avatarInitial) avatarInitial.textContent = getPartnerInitial();
+  const avatar = $('.header-avatar');
+  if (avatar) {
+    const existingImage = avatar.querySelector('img');
+    if (state.partner?.photoURL) {
+      if (existingImage) {
+        existingImage.src = state.partner.photoURL;
+      } else {
+        const image = document.createElement('img');
+        image.src = state.partner.photoURL;
+        image.alt = '';
+        avatar.prepend(image);
+      }
+      avatar.classList.add('has-photo');
+    } else {
+      existingImage?.remove();
+      avatar.classList.remove('has-photo');
+    }
+  }
 
   if (state.partnerTyping) {
     statusEl.textContent = 'digitando...';
@@ -779,6 +804,85 @@ async function uploadAudio(blob) {
   return getDownloadURL(snapshot.ref);
 }
 
+async function prepareProfilePhoto(file) {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Selecione um arquivo de imagem.');
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error('A foto deve ter no máximo 10 MB.');
+  }
+
+  const source = await blobToDataURL(file);
+  const image = new Image();
+  image.src = source;
+  await image.decode();
+
+  const scale = Math.min(1, 512 / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Não foi possível preparar a foto.');
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  const photoBlob = await new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('Não foi possível converter a foto.'));
+    }, 'image/jpeg', 0.82);
+  });
+
+  return { blob: photoBlob, dataUrl: await blobToDataURL(photoBlob) };
+}
+
+async function saveProfilePhoto(file) {
+  try {
+    const { blob, dataUrl } = await prepareProfilePhoto(file);
+    let photoURL = dataUrl;
+
+    if (!state.isLocalMode && storage && state.user?.uid) {
+      const photoRef = ref(storage, `profiles/${state.user.uid}/${Date.now()}.jpg`);
+      const upload = await uploadBytes(photoRef, blob, {
+        contentType: 'image/jpeg',
+        cacheControl: 'public,max-age=31536000'
+      });
+      photoURL = await getDownloadURL(upload.ref);
+
+      if (auth.currentUser) {
+        await updateProfile(auth.currentUser, { photoURL });
+      }
+    }
+
+    state.user = { ...state.user, photoURL };
+    setActiveSession(state.user);
+    const registeredUsers = getRegisteredUsers();
+    const localUser = registeredUsers.find((user) => user.uid === state.user.uid);
+    if (localUser) {
+      localUser.photoURL = photoURL;
+      saveRegisteredUsers(registeredUsers);
+    }
+
+    if (!state.isLocalMode && db && state.user.uid) {
+      try {
+        await setDoc(doc(db, 'users', state.user.uid), { photoURL }, { merge: true });
+      } catch (error) {
+        console.error('Profile photo Firestore sync error:', error);
+        showToast('Foto atualizada, mas não foi possível sincronizar o perfil.');
+      }
+      updatePresence(true).catch((error) => {
+        console.error('Profile presence sync error:', error);
+        showToast('Foto atualizada, mas não foi possível sincronizar a presença.');
+      });
+    }
+
+    renderSettings();
+    showToast('Foto de perfil atualizada! 💜');
+  } catch (error) {
+    console.error('Profile photo update error:', error);
+    showToast(error.message || 'Não foi possível atualizar a foto de perfil.');
+  }
+}
+
 async function startRecording() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -846,6 +950,7 @@ function renderChat() {
   if (state.unsubMessages) state.unsubMessages();
   if (state.unsubPresence) state.unsubPresence();
   if (state.presenceInterval) clearInterval(state.presenceInterval);
+  state.activeMessageActions = null;
 
   const app = $('#app');
   app.innerHTML = `
@@ -853,7 +958,7 @@ function renderChat() {
       <!-- Header -->
       <div class="chat-header">
         <div class="header-avatar">
-          <span>${getPartnerInitial()}</span>
+          <span class="header-avatar-initial">${getPartnerInitial()}</span>
           <div class="online-dot"></div>
         </div>
         <div class="header-info">
@@ -1033,6 +1138,11 @@ function setupChatEvents() {
   });
 
   document.addEventListener('click', (e) => {
+    const clickedMessage = e.target.closest('.message-row');
+    if (state.activeMessageActions && clickedMessage?.dataset.msgid !== state.activeMessageActions) {
+      setActiveMessageActions(null);
+    }
+
     if (state.showEmojiPicker && !e.target.closest('.emoji-picker-modal') && !e.target.closest('#emoji-btn')) {
       state.showEmojiPicker = false;
       const picker = $('.emoji-picker-modal');
@@ -1247,7 +1357,7 @@ function renderMessages() {
       contentHtml += `<span class="message-text">${escapeHtml(msg.text)}</span>`;
     }
     const actionsHtml = `
-      <div class="message-actions">
+      <div class="message-actions"${state.activeMessageActions === msg.id ? '' : ' hidden'}>
         <button class="reply-message-btn" type="button" data-msgid="${msg.id}" aria-label="Responder mensagem" title="Responder">↩</button>
         ${isSent && msg.text ? `<button class="edit-message-btn" type="button" data-msgid="${msg.id}" aria-label="Editar mensagem" title="Editar">✎</button>` : ''}
         ${isSent ? `<button class="delete-message-btn" type="button" data-msgid="${msg.id}" aria-label="Apagar mensagem" title="Apagar">🗑</button>` : ''}
@@ -1255,7 +1365,7 @@ function renderMessages() {
     `;
 
     html += `
-      <div class="message-row ${direction}" data-msgid="${msg.id}">
+      <div class="message-row ${direction}${state.activeMessageActions === msg.id ? ' actions-visible' : ''}" data-msgid="${msg.id}">
         <div class="message-bubble">
           <button class="emoji-react-btn" data-msgid="${msg.id}">😊</button>
           ${actionsHtml}
@@ -1323,6 +1433,47 @@ function renderMessages() {
     img.addEventListener('click', () => {
       openLightbox(img.dataset.src);
     });
+  });
+
+  container.querySelectorAll('.message-bubble').forEach((bubble) => {
+    let startX = 0;
+    let startY = 0;
+    const row = bubble.closest('.message-row');
+
+    bubble.addEventListener('pointerdown', (event) => {
+      if (event.target.closest('button, a, audio, input')) return;
+      startX = event.clientX;
+      startY = event.clientY;
+      clearTimeout(state.messagePressTimeout);
+      state.messagePressTimeout = setTimeout(() => {
+        setActiveMessageActions(row.dataset.msgid);
+      }, 500);
+    });
+
+    bubble.addEventListener('pointermove', (event) => {
+      if (Math.abs(event.clientX - startX) > 12 || Math.abs(event.clientY - startY) > 12) {
+        clearTimeout(state.messagePressTimeout);
+      }
+    });
+
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach((eventName) => {
+      bubble.addEventListener(eventName, () => clearTimeout(state.messagePressTimeout));
+    });
+
+    bubble.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      setActiveMessageActions(row.dataset.msgid);
+    });
+  });
+}
+
+function setActiveMessageActions(messageId) {
+  state.activeMessageActions = messageId;
+  document.querySelectorAll('.message-row').forEach((row) => {
+    const isActive = row.dataset.msgid === messageId;
+    row.classList.toggle('actions-visible', isActive);
+    const actions = row.querySelector('.message-actions');
+    if (actions) actions.hidden = !isActive;
   });
 }
 
@@ -1508,6 +1659,23 @@ function renderSettings() {
 
     <div class="settings-section">
       <div class="settings-label">Sua Conta</div>
+      <div class="profile-photo-setting">
+        <div class="profile-photo-preview">
+          ${state.user?.photoURL
+            ? `<img src="${escapeHtml(state.user.photoURL)}" alt="Sua foto de perfil" />`
+            : `<span>${escapeHtml((state.user?.displayName || 'U').charAt(0).toUpperCase())}</span>`}
+        </div>
+        <div class="profile-photo-info">
+          <strong>Foto de perfil</strong>
+          <span>Escolha uma foto ou tire uma agora</span>
+        </div>
+      </div>
+      <div class="profile-photo-actions">
+        <button type="button" class="profile-photo-button" id="choose-profile-photo">Escolher foto</button>
+        <button type="button" class="profile-photo-button secondary" id="take-profile-photo">Tirar foto</button>
+      </div>
+      <input type="file" id="profile-photo-input" accept="image/*" hidden />
+      <input type="file" id="profile-camera-input" accept="image/*" capture="user" hidden />
       <div class="settings-toggle">
         <span>👤 ${state.user?.displayName || 'Usuário'}</span>
       </div>
@@ -1550,6 +1718,20 @@ function renderSettings() {
   panel.querySelector('.settings-close').addEventListener('click', () => {
     state.showSettings = false;
     renderSettings();
+  });
+
+  panel.querySelector('#choose-profile-photo').addEventListener('click', () => {
+    panel.querySelector('#profile-photo-input').click();
+  });
+  panel.querySelector('#take-profile-photo').addEventListener('click', () => {
+    panel.querySelector('#profile-camera-input').click();
+  });
+  panel.querySelectorAll('#profile-photo-input, #profile-camera-input').forEach((input) => {
+    input.addEventListener('change', async () => {
+      const [file] = input.files || [];
+      if (file) await saveProfilePhoto(file);
+      input.value = '';
+    });
   });
 
   panel.querySelector('#theme-setting').addEventListener('click', () => {
@@ -1600,7 +1782,8 @@ function init() {
         state.user = {
           uid: user.uid,
           displayName: user.displayName || 'Amor',
-          email: user.email
+          email: user.email,
+          photoURL: user.photoURL || null
         };
         setActiveSession(state.user);
         renderChat();

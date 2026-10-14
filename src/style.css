@@ -395,6 +395,23 @@ img {
   color: white;
   flex-shrink: 0;
   position: relative;
+  overflow: hidden;
+}
+
+.header-avatar img,
+.profile-photo-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.header-avatar > span {
+  position: relative;
+  z-index: 1;
+}
+
+.header-avatar.has-photo > span {
+  display: none;
 }
 
 .header-avatar .online-dot {
@@ -583,15 +600,11 @@ img {
   border-radius: var(--radius-full);
   background: var(--bg-secondary);
   box-shadow: var(--shadow-sm);
-  opacity: 0;
-  pointer-events: none;
   transition: var(--transition-fast);
 }
 
-.message-row:hover .message-actions,
-.message-actions:focus-within {
-  opacity: 1;
-  pointer-events: auto;
+.message-actions[hidden] {
+  display: none;
 }
 
 .message-actions button {
@@ -605,13 +618,6 @@ img {
 .message-actions button:hover {
   color: var(--accent-primary);
   background: var(--bg-surface-hover);
-}
-
-@media (hover: none) {
-  .message-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
 }
 
 .delete-message-btn {
@@ -643,17 +649,6 @@ img {
   background: transparent;
   opacity: 1;
   box-shadow: none;
-}
-
-.message-row:hover .delete-message-btn,
-.delete-message-btn:focus-visible {
-  opacity: 1;
-}
-
-@media (hover: none) {
-  .delete-message-btn {
-    opacity: 1;
-  }
 }
 
 .message-row.sent .message-bubble {
@@ -833,7 +828,7 @@ img {
   right: -12px;
 }
 
-.message-row:hover .emoji-react-btn {
+.message-row.actions-visible .emoji-react-btn {
   opacity: 1;
 }
 
@@ -1286,6 +1281,70 @@ img {
 
 .settings-section {
   margin-bottom: var(--space-xl);
+}
+
+.profile-photo-setting {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  margin-bottom: var(--space-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.profile-photo-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--accent-gradient);
+  color: #fff;
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+
+.profile-photo-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.profile-photo-info strong {
+  font-size: 0.9rem;
+}
+
+.profile-photo-info span {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.profile-photo-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+
+.profile-photo-button {
+  flex: 1;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-gradient);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.profile-photo-button.secondary {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-primary);
 }
 
 .settings-label {
