@@ -10,7 +10,7 @@ import {
   GoogleAuthProvider,
   signInWithPopup
 } from 'firebase/auth';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 
 const USERS_KEY = 'nj_registered_users';
 const SESSION_KEY = 'nj_active_session';
@@ -65,21 +65,37 @@ export async function loginWithGoogle() {
   const result = await signInWithPopup(auth, provider);
   const user = result.user;
 
+  let photoURL = user.photoURL || null;
+  let statusMessage = 'Disponível';
+
+  if (db) {
+    try {
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      if (userDoc.exists()) {
+        const data = userDoc.data();
+        if (data.photoURL) photoURL = data.photoURL;
+        if (data.statusMessage) statusMessage = data.statusMessage;
+      }
+    } catch (e) {
+      console.warn('Could not load user doc:', e);
+    }
+
+    await setDoc(doc(db, 'users', user.uid), {
+      displayName: user.displayName || 'Amor',
+      email: user.email,
+      photoURL: photoURL,
+      statusMessage: statusMessage,
+      lastLogin: serverTimestamp()
+    }, { merge: true });
+  }
+
   const sessionUser = {
     uid: user.uid,
     displayName: user.displayName || 'Amor',
     email: user.email,
-    photoURL: user.photoURL || null
+    photoURL: photoURL,
+    statusMessage: statusMessage
   };
-
-  if (db) {
-    await setDoc(doc(db, 'users', user.uid), {
-      displayName: sessionUser.displayName,
-      email: sessionUser.email,
-      photoURL: sessionUser.photoURL,
-      lastLogin: serverTimestamp()
-    }, { merge: true });
-  }
 
   setActiveSession(sessionUser);
   return sessionUser;
@@ -97,6 +113,8 @@ export async function registerAccount(name, email, password) {
       await setDoc(doc(db, 'users', cred.user.uid), {
         displayName: cleanName,
         email: cleanEmail,
+        statusMessage: 'Disponível',
+        photoURL: null,
         createdAt: serverTimestamp()
       });
     }
@@ -104,7 +122,8 @@ export async function registerAccount(name, email, password) {
       uid: cred.user.uid,
       displayName: cleanName,
       email: cleanEmail,
-      photoURL: cred.user.photoURL || null
+      photoURL: cred.user.photoURL || null,
+      statusMessage: 'Disponível'
     };
     setActiveSession(sessionUser);
     return sessionUser;
@@ -122,6 +141,8 @@ export async function registerAccount(name, email, password) {
     displayName: cleanName,
     email: cleanEmail,
     password: btoa(password),
+    photoURL: null,
+    statusMessage: 'Disponível',
     createdAt: new Date().toISOString()
   };
 
@@ -132,7 +153,8 @@ export async function registerAccount(name, email, password) {
     uid: newUser.uid,
     displayName: newUser.displayName,
     email: newUser.email,
-    photoURL: newUser.photoURL || null
+    photoURL: newUser.photoURL || null,
+    statusMessage: newUser.statusMessage || 'Disponível'
   };
   setActiveSession(sessionUser);
   return sessionUser;
@@ -144,11 +166,30 @@ export async function loginAccount(email, password) {
 
   if (isFirebaseConfigured() && auth) {
     const cred = await signInWithEmailAndPassword(auth, cleanEmail, password);
+    let photoURL = cred.user.photoURL || null;
+    let statusMessage = 'Disponível';
+    let displayName = cred.user.displayName || 'Amor';
+
+    if (db) {
+      try {
+        const userDoc = await getDoc(doc(db, 'users', cred.user.uid));
+        if (userDoc.exists()) {
+          const data = userDoc.data();
+          if (data.displayName) displayName = data.displayName;
+          if (data.photoURL) photoURL = data.photoURL;
+          if (data.statusMessage) statusMessage = data.statusMessage;
+        }
+      } catch (e) {
+        console.warn('Could not read user profile from firestore:', e);
+      }
+    }
+
     const sessionUser = {
       uid: cred.user.uid,
-      displayName: cred.user.displayName || 'Amor',
+      displayName: displayName,
       email: cred.user.email,
-      photoURL: cred.user.photoURL || null
+      photoURL: photoURL,
+      statusMessage: statusMessage
     };
     setActiveSession(sessionUser);
     return sessionUser;
@@ -168,7 +209,8 @@ export async function loginAccount(email, password) {
     uid: found.uid,
     displayName: found.displayName,
     email: found.email,
-    photoURL: found.photoURL || null
+    photoURL: found.photoURL || null,
+    statusMessage: found.statusMessage || 'Disponível'
   };
   setActiveSession(sessionUser);
   return sessionUser;
