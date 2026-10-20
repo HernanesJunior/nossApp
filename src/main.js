@@ -826,11 +826,13 @@ function renderReplyPreview() {
   preview.hidden = false;
   preview.innerHTML = `
     <div class="reply-preview-copy">
-      <strong>Respondendo a ${escapeHtml(state.replyTo.senderName)}</strong>
-      <span>${escapeHtml(state.replyTo.text)}</span>
+      <strong>Respondendo a <span data-reply-sender></span></strong>
+      <span data-reply-text></span>
     </div>
     <button type="button" class="reply-preview-close" aria-label="Cancelar resposta">✕</button>
   `;
+  preview.querySelector('[data-reply-sender]').textContent = String(state.replyTo.senderName);
+  preview.querySelector('[data-reply-text]').textContent = String(state.replyTo.text);
   preview.querySelector('.reply-preview-close').addEventListener('click', () => {
     state.replyTo = null;
     renderReplyPreview();
@@ -1834,7 +1836,7 @@ function renderMessages() {
   let html = '';
   let lastDate = '';
 
-  visibleMessages.forEach((msg) => {
+  visibleMessages.forEach((msg, messageIndex) => {
     const msgDate = formatDate(msg.createdAt);
     if (msgDate && msgDate !== lastDate) {
       lastDate = msgDate;
@@ -1873,8 +1875,8 @@ function renderMessages() {
     if (msg.replyTo) {
       contentHtml += `
         <div class="message-quote">
-          <strong>${escapeHtml(msg.replyTo.senderName || 'Contato')}</strong>
-          <span>${escapeHtml(msg.replyTo.text || 'Mensagem')}</span>
+          <strong data-reply-sender></strong>
+          <span data-reply-text></span>
         </div>
       `;
     }
@@ -1913,7 +1915,7 @@ function renderMessages() {
       `;
     }
     if (msg.text) {
-      contentHtml += `<span class="message-text">${escapeHtml(msg.text)}</span>`;
+      contentHtml += '<span class="message-text"></span>';
     }
 
     const actionsHtml = `
@@ -1932,7 +1934,7 @@ function renderMessages() {
     `;
 
     html += `
-      <div class="message-row ${direction}${state.activeMessageActions === msg.id ? ' actions-visible' : ''}" data-msgid="${msg.id}">
+      <div class="message-row ${direction}${state.activeMessageActions === msg.id ? ' actions-visible' : ''}" data-msgid="${msg.id}" data-render-index="${messageIndex}">
         <div class="message-bubble">
           <button class="emoji-react-btn" data-msgid="${msg.id}">😊</button>
           ${actionsHtml}
@@ -1950,6 +1952,20 @@ function renderMessages() {
   });
 
   container.innerHTML = html;
+  container.querySelectorAll('.message-row[data-render-index]').forEach((row) => {
+    const message = visibleMessages[Number(row.dataset.renderIndex)];
+    if (!message) return;
+
+    const messageText = row.querySelector('.message-text');
+    if (messageText) messageText.textContent = String(message.text || '');
+
+    if (message.replyTo) {
+      const replySender = row.querySelector('[data-reply-sender]');
+      const replyText = row.querySelector('[data-reply-text]');
+      if (replySender) replySender.textContent = String(message.replyTo.senderName || 'Contato');
+      if (replyText) replyText.textContent = String(message.replyTo.text || 'Mensagem');
+    }
+  });
 
   requestAnimationFrame(() => {
     container.scrollTop = container.scrollHeight;
@@ -2449,8 +2465,8 @@ function renderStarredModal() {
           </div>
         ` : `
           <div class="starred-list">
-            ${starredList.map(msg => `
-              <div class="starred-card" data-msgid="${msg.id}" title="Clique para ir até a mensagem">
+            ${starredList.map((msg, index) => `
+              <div class="starred-card" data-msgid="${msg.id}" data-render-index="${index}" title="Clique para ir até a mensagem">
                 <div class="starred-card-top">
                   <span class="starred-card-sender">${escapeHtml(msg.senderName || 'Amor')}</span>
                   <span>${formatTime(msg.createdAt)} · ${formatDate(msg.createdAt)}</span>
@@ -2459,7 +2475,7 @@ function renderStarredModal() {
                   ${msg.imageUrl ? `<img src="${escapeHtml(msg.imageUrl)}" style="max-height: 80px; border-radius: 6px; margin-bottom: 4px;" alt="foto" /><br />` : ''}
                   ${msg.audioUrl ? `<span>🎤 Mensagem de áudio</span><br />` : ''}
                   ${msg.fileName ? `<span>📎 ${escapeHtml(msg.fileName)}</span><br />` : ''}
-                  ${msg.text ? `<span>${escapeHtml(msg.text)}</span>` : ''}
+                  ${msg.text ? '<span class="starred-card-message-text"></span>' : ''}
                 </div>
               </div>
             `).join('')}
@@ -2470,6 +2486,12 @@ function renderStarredModal() {
   `;
 
   document.body.appendChild(modal);
+
+  modal.querySelectorAll('.starred-card[data-render-index]').forEach((card) => {
+    const message = starredList[Number(card.dataset.renderIndex)];
+    const messageText = card.querySelector('.starred-card-message-text');
+    if (message && messageText) messageText.textContent = String(message.text || '');
+  });
 
   modal.querySelector('#close-starred-modal')?.addEventListener('click', () => modal.remove());
   modal.addEventListener('click', (e) => {
@@ -2916,32 +2938,33 @@ async function logoutUser() {
 // Initialization
 // ============================================
 function init() {
-  const session = getActiveSession();
-  if (session) {
-    state.user = session;
-    renderChat();
+  if (!isFirebaseConfigured() || !auth) {
+    const session = getActiveSession();
+    if (session) {
+      state.user = session;
+      renderChat();
+    } else {
+      renderLogin('login');
+    }
     return;
   }
 
-  if (isFirebaseConfigured() && auth) {
-    onAuthStateChanged(auth, (user) => {
-      if (user) {
-        state.user = {
-          uid: user.uid,
-          displayName: user.displayName || 'Amor',
-          email: user.email,
-          photoURL: user.photoURL || null,
-          statusMessage: 'Disponível'
-        };
-        setActiveSession(state.user);
-        renderChat();
-      } else {
-        renderLogin('login');
-      }
-    });
-  } else {
-    renderLogin('login');
-  }
+  onAuthStateChanged(auth, (user) => {
+    if (user) {
+      state.user = {
+        uid: user.uid,
+        displayName: user.displayName || 'Amor',
+        email: user.email,
+        photoURL: user.photoURL || null,
+        statusMessage: 'Disponível'
+      };
+      setActiveSession(state.user);
+      renderChat();
+    } else {
+      setActiveSession(null);
+      renderLogin('login');
+    }
+  });
 }
 
 init();

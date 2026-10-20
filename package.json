@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "deploy": "vite build && cmd.exe /c firebase deploy --only hosting,firestore:rules,storage"
   },
   "devDependencies": {
     "vite": "5.4.14"
