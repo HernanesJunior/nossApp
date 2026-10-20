@@ -19,6 +19,13 @@ export const firebaseConfig = {
 
 export const isFirebaseConfigured = () => true;
 
+const COUPLE_UIDS = new Set([
+  '0nToiexTS9VckpFYXSjnx5JCrfj2',
+  'CIGPWAGPA1gEFvTu8QgcxQR3P2H2'
+]);
+
+export const isCoupleMember = (uid) => COUPLE_UIDS.has(uid);
+
 // Inicialização
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 export const auth = getAuth(app);

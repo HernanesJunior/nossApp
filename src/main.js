@@ -3,9 +3,8 @@
 // ============================================
 
 import './style.css';
-import { auth, db, storage, isFirebaseConfigured } from './firebase.js';
+import { auth, db, storage, isFirebaseConfigured, isCoupleMember } from './firebase.js';
 import {
-  registerAccount,
   loginAccount,
   loginWithGoogle,
   getActiveSession,
@@ -275,7 +274,6 @@ if (localChannel) {
 // ============================================
 function renderLogin(mode = 'login') {
   const app = $('#app');
-  const isRegister = mode === 'register';
 
   app.innerHTML = `
     <div class="login-screen">
@@ -298,31 +296,21 @@ function renderLogin(mode = 'login') {
         <section class="login-panel">
           <div class="login-panel-content">
             <div class="login-kicker">BEM-VINDO(A) AO N&J</div>
-            <h1 class="login-title">${isRegister ? 'CRIAR CONTA' : 'SIGN IN'}</h1>
-            <p class="login-subtitle">${isRegister ? 'Crie seu espaço privado a dois.' : 'Entre com seu e-mail para continuar'}</p>
+            <h1 class="login-title">SIGN IN</h1>
+            <p class="login-subtitle">Entre com seu e-mail para continuar</p>
 
             <div class="login-form" id="auth-form-container">
-              ${isRegister ? `
-                <div class="login-input-group">
-                  <input type="text" id="auth-name" placeholder="Seu nome" autocomplete="name" aria-label="Seu nome" />
-                </div>
-              ` : ''}
               <div class="login-input-group">
                 <input type="email" id="auth-email" placeholder="Seu e-mail" autocomplete="email" aria-label="Seu e-mail" />
               </div>
               <div class="login-input-group">
-                <input type="password" id="auth-password" placeholder="Sua senha" autocomplete="${isRegister ? 'new-password' : 'current-password'}" aria-label="Sua senha" />
+                <input type="password" id="auth-password" placeholder="Sua senha" autocomplete="current-password" aria-label="Sua senha" />
               </div>
-              ${isRegister ? `
-                <div class="login-input-group">
-                  <input type="password" id="auth-password-confirm" placeholder="Confirme sua senha" autocomplete="new-password" aria-label="Confirme sua senha" />
-                </div>
-              ` : ''}
 
               <p class="login-error" id="auth-error"></p>
 
               <button type="button" class="login-btn" id="auth-submit-btn">
-                ${isRegister ? 'Criar minha conta' : 'Entrar'} <span aria-hidden="true">→</span>
+                Entrar <span aria-hidden="true">→</span>
               </button>
             </div>
 
@@ -332,11 +320,6 @@ function renderLogin(mode = 'login') {
               <span>Continuar com Google</span>
             </button>
 
-            <div class="login-account-switch">
-              <span>${isRegister ? 'Já tem uma conta?' : 'Ainda não tem uma conta?'}</span>
-              <button type="button" id="${isRegister ? 'tab-login' : 'tab-register'}">${isRegister ? 'Entrar' : 'Criar conta'}</button>
-            </div>
-
             <button class="login-firebase-link" id="open-firebase-config">
               ⚙️ ${isFirebaseConfigured() ? 'Firebase conectado' : 'Configurar sincronização em nuvem'}
             </button>
@@ -345,10 +328,6 @@ function renderLogin(mode = 'login') {
       </div>
     </div>
   `;
-
-  // Tabs events
-  $('#tab-login')?.addEventListener('click', () => renderLogin('login'));
-  $('#tab-register')?.addEventListener('click', () => renderLogin('register'));
 
   $('#open-firebase-config').addEventListener('click', () => renderFirebaseModal());
 
@@ -380,7 +359,6 @@ function renderLogin(mode = 'login') {
 
     const email = $('#auth-email')?.value.trim();
     const password = $('#auth-password')?.value;
-    const name = isRegister ? $('#auth-name')?.value.trim() : '';
 
     if (!email || !password) {
       errorEl.textContent = 'Preencha todos os campos.';
@@ -392,37 +370,19 @@ function renderLogin(mode = 'login') {
       return;
     }
 
-    if (isRegister) {
-      if (!name) {
-        errorEl.textContent = 'Digite seu nome.';
-        return;
-      }
-      const confirm = $('#auth-password-confirm')?.value;
-      if (password !== confirm) {
-        errorEl.textContent = 'As senhas não coincidem.';
-        return;
-      }
-    }
-
     submitBtn.disabled = true;
     submitBtn.innerHTML = '<div class="spinner" style="margin: 0 auto;"></div>';
 
     try {
-      if (isRegister) {
-        const user = await registerAccount(name, email, password);
-        state.user = user;
-        showToast(`Conta criada com sucesso, bem-vindo(a) ${user.displayName}! 💜`);
-      } else {
-        const user = await loginAccount(email, password);
-        state.user = user;
-        showToast(`Bem-vindo(a) de volta, ${user.displayName}! 💜`);
-      }
+      const user = await loginAccount(email, password);
+      state.user = user;
+      showToast(`Bem-vindo(a) de volta, ${user.displayName}! 💜`);
       renderChat();
     } catch (err) {
       console.error('Auth error:', err);
       errorEl.textContent = err.message || 'Erro ao processar. Verifique os dados.';
       submitBtn.disabled = false;
-      submitBtn.innerHTML = `${isRegister ? 'Criar minha conta' : 'Entrar no Chat'} 💜`;
+      submitBtn.innerHTML = 'Entrar no Chat 💜';
     }
   };
 
@@ -2951,6 +2911,17 @@ function init() {
 
   onAuthStateChanged(auth, (user) => {
     if (user) {
+      if (!isCoupleMember(user.uid)) {
+        state.user = null;
+        setActiveSession(null);
+        renderLogin('login');
+        showToast('Esta conta não tem autorização para acessar o chat.');
+        signOut(auth).catch((error) => {
+          console.error('Unauthorized account sign-out error:', error);
+        });
+        return;
+      }
+
       state.user = {
         uid: user.uid,
         displayName: user.displayName || 'Amor',

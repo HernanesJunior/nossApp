@@ -2,10 +2,11 @@
 // N&J — User Authentication & Account Store
 // ============================================
 
-import { auth, db, isFirebaseConfigured } from './firebase.js';
+import { auth, db, isFirebaseConfigured, isCoupleMember } from './firebase.js';
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
+  signOut,
   updateProfile,
   GoogleAuthProvider,
   signInWithPopup
@@ -64,6 +65,10 @@ export async function loginWithGoogle() {
 
   const result = await signInWithPopup(auth, provider);
   const user = result.user;
+  if (!isCoupleMember(user.uid)) {
+    await signOut(auth);
+    throw new Error('Esta conta não tem autorização para acessar o chat.');
+  }
 
   let photoURL = user.photoURL || null;
   let statusMessage = 'Disponível';
@@ -166,6 +171,11 @@ export async function loginAccount(email, password) {
 
   if (isFirebaseConfigured() && auth) {
     const cred = await signInWithEmailAndPassword(auth, cleanEmail, password);
+    if (!isCoupleMember(cred.user.uid)) {
+      await signOut(auth);
+      throw new Error('Esta conta não tem autorização para acessar o chat.');
+    }
+
     let photoURL = cred.user.photoURL || null;
     let statusMessage = 'Disponível';
     let displayName = cred.user.displayName || 'Amor';

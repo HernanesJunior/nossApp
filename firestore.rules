@@ -2,17 +2,25 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isCoupleMember() {
+      return request.auth != null
+        && request.auth.uid in [
+          '0nToiexTS9VckpFYXSjnx5JCrfj2',
+          'CIGPWAGPA1gEFvTu8QgcxQR3P2H2'
+        ];
+    }
+
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read, write: if isCoupleMember() && request.auth.uid == userId;
     }
 
     match /presence/{userId} {
-      allow read: if request.auth != null;
-      allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+      allow read: if isCoupleMember();
+      allow create, update, delete: if isCoupleMember() && request.auth.uid == userId;
     }
 
     match /messages/{messageId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isCoupleMember();
     }
   }
 }
